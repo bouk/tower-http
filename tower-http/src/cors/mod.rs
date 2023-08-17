@@ -72,6 +72,8 @@ mod allow_origin;
 mod allow_private_network;
 mod expose_headers;
 mod max_age;
+#[cfg(test)]
+mod tests;
 mod vary;
 
 pub use self::{
@@ -681,8 +683,7 @@ where
         match self.project().inner.project() {
             KindProj::CorsCall { future, headers } => {
                 let mut response: Response<B> = ready!(future.poll(cx))?;
-                response.headers_mut().extend(headers.drain());
-
+                header_map_append_all(response.headers_mut(), headers.drain());
                 Poll::Ready(Ok(response))
             }
             KindProj::PreflightCall { headers } => {
@@ -692,6 +693,46 @@ where
                 Poll::Ready(Ok(response))
             }
         }
+    }
+}
+
+// There is an Extend implementation for HeaderMap, but we can't use it because
+// it would delete existing header values for any header names that are in
+// `headers`.
+fn header_map_append_all(
+    header_map: &mut HeaderMap,
+    mut cors_header_iter: impl Iterator<Item = (Option<HeaderName>, HeaderValue)>,
+) {
+    if let Some((first_name, first_value)) = cors_header_iter.next() {
+        let first_name =
+            first_name.expect("first item of HeaderMap Drain iterator must have a name");
+
+        let mut entry = header_map.entry(first_name);
+        entry = entry_append(entry, first_value);
+
+        for (name, value) in cors_header_iter {
+            // If name is `None`, this iterator item is a new value
+            // for the same key, reuse the previous entry.
+            // If it is `Some(name)`, get a new entry for that name
+            // and start operating on that.
+            if let Some(name) = name {
+                entry = header_map.entry(name);
+            }
+            entry = entry_append(entry, value);
+        }
+    }
+}
+
+fn entry_append(
+    entry: header::Entry<'_, HeaderValue>,
+    first_value: HeaderValue,
+) -> header::Entry<'_, HeaderValue> {
+    match entry {
+        header::Entry::Occupied(mut o) => {
+            o.append(first_value);
+            header::Entry::Occupied(o)
+        }
+        header::Entry::Vacant(v) => header::Entry::Occupied(v.insert_entry(first_value)),
     }
 }
 
